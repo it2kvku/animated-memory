@@ -1,94 +1,122 @@
-name: System-Diagnostics-Windows
+name: win-rdp
 
 on:
   workflow_dispatch:
 
 jobs:
-  diagnostic-run:
+  rdp:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
 
     steps:
-      - name: Basic system info
-        shell: pwsh
-        run: |
-          Write-Host "=== SYSTEM ==="
-          hostname
-          Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsHardwareAbstractionLayer
-          Write-Host "`n=== NETWORK ==="
-          ipconfig /all
-          route print
 
-      - name: Check Remote Desktop related settings
-        shell: pwsh
-        run: |
-          Write-Host "=== RDP REGISTRY ==="
-          reg query "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server"
-          reg query "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+    - name: enable rdp
+      shell: powershell
+      run: |
 
-          Write-Host "`n=== SERVICES ==="
-          Get-Service TermService, UmRdpService, SessionEnv | Format-Table -Auto
+        reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+         /v fDenyTSConnections /t REG_DWORD /d 0 /f
 
-          Write-Host "`n=== FIREWALL RULES ==="
-          Get-NetFirewallRule -DisplayGroup "Remote Desktop" |
-            Select-Object DisplayName, Enabled, Direction, Action |
-            Format-Table -Auto
+        netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
 
-          Write-Host "`n=== PORT 3389 ==="
-          netstat -ano | findstr 3389
+        sc.exe config TermService start= auto
+        sc.exe start TermService
 
-      - name: Create temporary local test user
-        shell: pwsh
-        run: |
-          $user = "diaguser"
-          $pass = "Diag@" + (Get-Random -Minimum 1000 -Maximum 9999)
+        Start-Sleep 10
 
-          if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
-            Remove-LocalUser -Name $user
-          }
 
-          $secure = ConvertTo-SecureString $pass -AsPlainText -Force
-          New-LocalUser -Name $user -Password $secure -AccountNeverExpires
-          Add-LocalGroupMember -Group "Users" -Member $user
+    - name: create user
+      shell: powershell
+      run: |
 
-          Write-Host "Created temporary user: $user"
-          Write-Host "Password: $pass"
+        $u="runner"
+        $p="Rdp@" + (Get-Random -Minimum 1000 -Maximum 9999)
 
-      - name: Install Tailscale for diagnostics
-        shell: pwsh
-        run: |
-          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale.exe"
-          Start-Process "$env:TEMP\tailscale.exe" -ArgumentList "/silent" -Wait
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" version
+        cmd /c "net user $u $p /add"
 
-      - name: Connect Tailscale
-        shell: pwsh
-        run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=diag-$env:GITHUB_RUN_ID
-          Start-Sleep 10
-          Write-Host "=== TAILSCALE STATUS ==="
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" status
-          Write-Host "`n=== TAILSCALE IP ==="
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+        cmd /c "net localgroup administrators $u /add"
 
-      - name: Connectivity diagnostics
-        shell: pwsh
-        run: |
-          $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 | Select-Object -First 1).Trim()
-          Write-Host "Self Tailscale IP: $ip"
-          Test-NetConnection -ComputerName $ip -Port 3389 | Format-List
+        cmd /c "net localgroup `"Remote Desktop Users`" $u /add"
 
-      - name: Session diagnostics
-        shell: pwsh
-        run: |
-          Write-Host "=== SESSIONS ==="
-          qwinsta
-          quser
+        echo "USR=$u" >> $env:GITHUB_ENV
+        echo "PWD=$p" >> $env:GITHUB_ENV
 
-      - name: Keep job alive briefly for inspection
-        shell: pwsh
-        run: |
-          1..12 | ForEach-Object {
-            Write-Host "Diagnostic heartbeat $_"
-            Start-Sleep -Seconds 300
-          }
+
+    - name: force rdp policy
+      shell: powershell
+      run: |
+
+        reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" `
+         /v fDenyTSConnections /t REG_DWORD /d 0 /f
+
+        reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" `
+         /v UserAuthentication /t REG_DWORD /d 0 /f
+
+        gpupdate /force
+
+        Restart-Service TermService -Force
+
+        Start-Sleep 10
+
+
+    - name: prepare session
+      shell: powershell
+      run: |
+
+        qwinsta
+
+        cmd /c "tscon 1 /dest:console" 2>$null
+
+        Start-Sleep 5
+
+
+    - name: install tailscale
+      shell: powershell
+      run: |
+
+        Invoke-WebRequest `
+         https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe `
+         -OutFile ts.exe
+
+        Start-Process ts.exe -ArgumentList "/silent" -Wait
+
+
+    - name: connect tailscale
+      shell: powershell
+      run: |
+
+        & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+          --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+          --hostname=gh-$env:GITHUB_RUN_ID
+
+        Start-Sleep 15
+
+        $ip=& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+
+        echo "IP=$ip" >> $env:GITHUB_ENV
+
+
+    - name: show login
+      shell: powershell
+      run: |
+
+        Write-Host ""
+        Write-Host "IP: $env:IP"
+        Write-Host "USER: $env:USR"
+        Write-Host "PASS: $env:PWD"
+
+        netstat -ano | findstr 3389
+
+        qwinsta
+
+
+    - name: keep alive
+      shell: powershell
+      run: |
+
+        while($true){
+
+          Write-Host "alive"
+          Start-Sleep 300
+
+        }
