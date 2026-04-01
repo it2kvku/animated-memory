@@ -9,86 +9,60 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: enable rdp
+        shell: powershell
+        run: |
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+          sc.exe config TermService start= auto
+          sc.exe start TermService
+          qwinsta
+          Start-Sleep 10
+          netstat -ano | findstr 3389
 
-    - name: enable rdp
-      shell: powershell
-      run: |
+      - name: create user
+        shell: powershell
+        run: |
+          $u = "runner"
+          $p = "Runner@" + (Get-Random)
 
-        reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" `
-         /v fDenyTSConnections /t REG_DWORD /d 0 /f
+          if (Get-LocalUser -Name $u -ErrorAction SilentlyContinue) {
+            Remove-LocalUser -Name $u
+          }
 
-        netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+          net user $u $p /add
+          net localgroup administrators $u /add
+          net localgroup "Remote Desktop Users" $u /add
 
-        sc config TermService start= auto
-        net start TermService
+          echo "USR=$u" >> $env:GITHUB_ENV
+          echo "PWD=$p" >> $env:GITHUB_ENV
 
-        qwinsta
+      - name: install tailscale
+        shell: powershell
+        run: |
+          Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe -OutFile ts.exe
+          Start-Process .\ts.exe -ArgumentList "/silent" -Wait
 
-        Start-Sleep 10
+      - name: connect tailscale
+        shell: powershell
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-$env:GITHUB_RUN_ID
+          Start-Sleep 15
+          $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          echo "IP=$ip" >> $env:GITHUB_ENV
 
+      - name: show login
+        shell: powershell
+        run: |
+          Write-Host "IP: $env:IP"
+          Write-Host "User: $env:USR"
+          Write-Host "Pass: $env:PWD"
+          netstat -ano | findstr 3389
 
-    - name: create user
-      shell: powershell
-      run: |
-
-        $u="runner"
-        $p="Runner@" + (Get-Random)
-
-        net user $u $p /add
-
-        net localgroup administrators $u /add
-        net localgroup "Remote Desktop Users" $u /add
-
-        echo "USR=$u" >> $env:GITHUB_ENV
-        echo "PWD=$p" >> $env:GITHUB_ENV
-
-
-    - name: install tailscale
-      shell: powershell
-      run: |
-
-        Invoke-WebRequest `
-        https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe `
-        -OutFile ts.exe
-
-        Start-Process ts.exe `
-        -ArgumentList "/silent" `
-        -Wait
-
-
-    - name: connect tailscale
-      shell: powershell
-      run: |
-
-        & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
-        --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
-        --hostname=gh-$env:GITHUB_RUN_ID
-
-        Start-Sleep 15
-
-        $ip=& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-
-        echo "IP=$ip" >> $env:GITHUB_ENV
-
-
-    - name: show login
-      shell: powershell
-      run: |
-
-        Write-Host "IP: $env:IP"
-        Write-Host "User: $env:USR"
-        Write-Host "Pass: $env:PWD"
-
-        netstat -ano | findstr 3389
-
-
-    - name: keep alive
-      shell: powershell
-      run: |
-
-        while($true){
-
-          Write-Host "running..."
-          Start-Sleep 300
-
-        }
+      - name: keep alive
+        shell: powershell
+        run: |
+          while ($true) {
+            Write-Host "running..."
+            Start-Sleep 300
+          }
